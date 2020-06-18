@@ -143,38 +143,116 @@ def getcov(scale):
     return tf.linalg.band_part(scale, -1, 0) @ tf.transpose(tf.linalg.band_part(scale, -1, 0))
 
 class CalibrationSystem():
-    def __init__(self,X,Y,Z,refsensor,N,C,transform_fn,gpflowkernel,likelihoodstd=1.0):
+    def __init__(self,X,Y,Z,refsensor,C,transform_fn,gpflowkernel,likelihoodstd=1.0,jitter=1e-4):
+        """
+        A tool for running the calibration algorithm on a dataset, produces
+        estimates of the calibration parameters over time for each sensor.
+        
+        The input refers to pairs of colocated observations. N = the number of
+        these pairs of events.
+        
+        Parameters
+        ----------
+        X : An N x 3 matrix. The first column is the time of the observation
+        pair, the second and third columns are the index of the sensors.
+        Y : An N x 2 matrix. The two columns are the observations from the two
+        sensors at the colocation event.
+        Z : Either an M x 1 matrix or an M*S x 2 matrix. The former just has
+        the inducing input locations specfied in time. The latter also specifies
+        their associated sensor in the second column.
+        refsensor : a binary, S dimensional vector. 1=reference sensor.
+                    (number of sensors inferred from this vector)
+        C : number of components required for transform_fn. Scaling will require
+        just one. While a 2nd order polynomial will require 3.
+        transform_fn : A function of the form: def transform_fn(samps,Y),
+           where samps's shape is: [batch (number of samples) 
+                                     x number of observations (N) 
+                                     x (number of components) (C)].
+                 Y's shape is [number of observations (N) x 1].
+        gpflowkernel : A one dimensional kernel that describes all components.
+          TODO: We should allow different kernels for different components.
+                If one wishes to now, then after calling the constructor,
+                set self.k with an alternative kernel object.
+        likelihoodstd : The standard deviation of the likelihood function,
+                which by default computes the difference between observation
+                pairs (default=1.0). The self.likelihoodfn could be set to
+                a different likelihood.
+        jitter : Jitter added to ensure stability (default=1e-4).
+                             
+        TODO what happens if refsensor is integer?
+                          if float64 used for others..
+        
+        """
+        S = len(refsensor)
+        self.C = C
+        self.Y = Y        
         self.k = Kernel(gpflowkernel)
         self.likelihoodstd = likelihoodstd
-        self.X = X
-        self.Y = Y
-        self.Z = Z
-        self.N = N
+        
+    
+        #internally we use a different X and Z:
+        #we add additional rows to X and Z to account for the components we are
+        #modelling. In principle the different components could have different
+        #inducing points and kernels, but for simplicity we combine them.
+        #These two matrices have three columns, the time, the sensor and the
+        #component. They are constructed as below, with the sensor measurement
+        #pairs in cosecutive submatrices, which is iterated over C times.
+        #Time Sensor Component
+        #  1    0    0
+        #  2    0    0
+        #  1    1    0
+        #  2    1    0
+        #  1    0    1
+        #  2    0    1
+        #  1    1    1
+        #  2    1    1
+        self.X = np.c_[np.tile(np.r_[np.c_[X[:,0],X[:,1]],np.c_[X[:,0],X[:,2]]],[self.C,1]),np.repeat(np.arange(self.C),2*len(X))]
+
+        
+        #Construct Z:
+        #self.Z = np.c_[np.tile(np.r_[np.c_[Z[:,0],Z[:,1]],np.c_[Z[:,0],Z[:,2]]],[C,1]),np.repeat(np.arange(C),2*len(Z))]
+        if Z.shape[1]==1:
+            Ztemp = np.c_[np.tile(Z,[S,1]),np.repeat(np.arange(S),len(Z))]
+        if Z.shape[1]==2:
+            Ztemp = Z
+        self.Z = np.c_[np.tile(Ztemp,[C,1]),np.repeat(np.arange(self.C),len(Ztemp))]
+        
+        self.N = N = len(X)
         self.refsensor = refsensor.astype(np.float32)
+        self.jitter = jitter
+        self.transform_fn = transform_fn        
+        self.precompute()
+        
+    def precompute(self):    
         #definition of q(u)
-        M = Z.shape[0]
+        M = self.Z.shape[0]
         self.mu = tf.Variable(0.01*tf.random.normal([M,1]))
         self.scale = tf.Variable(1*np.tril(0.1*np.random.randn(M,M)+np.eye(M)),dtype=tf.float32)
-
-        self.jitter = 1e-4
+        
         #parameters for p(u)
         mu_u = tf.zeros([M],dtype=tf.float32)
-        cov_u = tf.Variable(self.k.matrix(Z,Z),dtype=tf.float32)
+        cov_u = tf.Variable(self.k.matrix(self.Z,self.Z),dtype=tf.float32)
         self.pu = tfd.MultivariateNormalFullCovariance(mu_u,cov_u+np.eye(cov_u.shape[0])*self.jitter)
 
-        self.ref = tf.gather(self.refsensor,tf.transpose(tf.reshape(X[:(2*N),1:2].astype(int),[2,N])))
+        self.ref = tf.gather(self.refsensor,tf.transpose(tf.reshape(self.X[:(2*self.N),1:2].astype(int),[2,self.N])))
         self.optimizer = tf.keras.optimizers.Adam(learning_rate=0.05,amsgrad=False)
-        self.transform_fn = transform_fn
-        self.sm = SparseModel(X,Z,C,self.k)
-    def compute(self,its=700,samples=100):
+        self.sm = SparseModel(self.X,self.Z,self.C,self.k)
+        
+    def likelihoodfn(self,scaledA,scaledB):
+        return tfd.Normal(0,self.likelihoodstd).log_prob(scaledA-scaledB)
+
+    def run(self,its=700,samples=100):
         for it in range(its):
             with tf.GradientTape() as tape:
                 qu = tfd.MultivariateNormalTriL(self.mu[:,0],self.scale)
                 samps = self.sm.get_samples(self.mu,self.scale,samples)
                 #self.samps = samps
                 #break
-                scaled = (self.transform_fn(samps,self.Y) * (1-self.ref)) + (self.Y * self.ref)
-                ell = tf.reduce_mean(tf.reduce_sum(tfd.Normal(0,self.likelihoodstd).log_prob(scaled[:,:,0]-scaled[:,:,1]),1))
+                scaled = tf.concat([self.transform_fn(samps[:,:,::2],self.Y[:,0:1]),self.transform_fn(samps[:,:,1::2],self.Y[:,1:2])],2)
+                #print(samps.shape,self.Y.shape,self.ref.shape,self.ref)
+                scaled = (scaled * (1-self.ref)) + (self.Y * self.ref)
+                #scaled = (self.transform_fn(samps,self.Y) * (1-self.ref)) + (self.Y * self.ref)
+                ell = tf.reduce_mean(tf.reduce_sum(self.likelihoodfn(scaled[:,:,0],scaled[:,:,1]),1))
                 elbo_loss = -ell+tfd.kl_divergence(qu,self.pu)
                 gradients = tape.gradient(elbo_loss, [self.mu,self.scale])
                 self.optimizer.apply_gradients(zip(gradients, [self.mu, self.scale]))  
