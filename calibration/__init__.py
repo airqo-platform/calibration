@@ -65,17 +65,30 @@ class EQ(Kernel):
 class SparseModel():
     def __init__(self,X,Z,C,k):
         """
-        Precompute matrices for VI.
+        A Gaussian process Sparse model for performing Variational Inference.
+        
+        Parameters:
         X = a (2*C*N) x 3 matrix
         each pair of rows, from the top and bottom half of the matrix refer to a pair
         of observations taken by two sensors at the same(ish) place and time.
         Within these two halves, there are C submatrices, of shape (Cx3), each one is
         for a particular component of the calibration function.
+        Columns: time, sensor, component
         
-        Z = a (2*C*M) x 3 matrix
+        Z = a (2*C*M) x 3 matrix, same structure as for X.
+        Columns: time, sensor, component        
         
         C = number of components/parameters the transform requires (e.g. a straight line requires two).
         k = the kernel object
+        
+        Note the constructor precomputes some matrices for the VI.
+        
+        This class doesn't hold the variational approximation's mean and covariance,
+        but assumes a Gaussian that is used for sampling by calling 'get_samples'
+        or 'get_samples_one_sensor'.
+        These two methods take mu and scale, which describe the approximation.
+        If you set scale to None then it assumes you are not modelling the covariance
+        and returns a single 'sample' which is the posterior mean prediction.
         """
         
         self.jitter = 1e-4
@@ -91,9 +104,12 @@ class SparseModel():
         self.C = C
         self.Npairs = int(X.shape[0]/(C*2)) #actual number of observation *pairs*
         self.N = int(X.shape[0]/C)
-    def get_qf(self,mu,scale):
+    def get_qf(self,mu,scale):    
         qf_mu = self.KxzKzzinv @ mu
-        qf_cov = self.Kxx - self.KxzKzzinvKzx + self.KxzKzzinv @ getcov(scale) @ self.KzzinvKzx
+        if scale is None:
+            qf_cov = None
+        else:
+            qf_cov = self.Kxx - self.KxzKzzinvKzx + self.KxzKzzinv @ getcov(scale) @ self.KzzinvKzx
         return qf_mu,qf_cov
     def get_samples(self,mu,scale,num=100):
         """
@@ -104,8 +120,16 @@ class SparseModel():
                 C = number of components
         So for the tensor that is returned, the last dimension consists of the pairs of
         sensors, with each pair being one of the C components.
-        """
+        
+        If scale is set to None, then we return a single sample, of the posterior mean
+        (i.e. we assume a dirac q(f).
+        Returns 1 x N x (C*2) matrix.
+        
+        """                
         qf_mu,qf_cov = self.get_qf(mu,scale)
+        if scale is None:
+            return tf.transpose(tf.reshape(qf_mu,[2*self.C,self.Npairs]))[None,:,:]
+            
         batched_mu = tf.transpose(tf.reshape(qf_mu,[2*self.C,self.Npairs]))
         batched_cov = []
         for ni in range(0,self.Npairs*self.C*2,self.Npairs):
@@ -129,6 +153,9 @@ class SparseModel():
         
         
         qf_mu,qf_cov = self.get_qf(mu,scale)
+        if scale is None:
+            return tf.transpose(tf.reshape(qf_mu,[self.C,self.N]))[None,:,:]
+            
         batched_mu = tf.transpose(tf.reshape(qf_mu,[self.C,self.N]))
         batched_cov = []
         for ni in range(0,self.N*self.C,self.N):
@@ -143,7 +170,7 @@ def getcov(scale):
     return tf.linalg.band_part(scale, -1, 0) @ tf.transpose(tf.linalg.band_part(scale, -1, 0))
 
 class CalibrationSystem():
-    def __init__(self,X,Y,Z,refsensor,C,transform_fn,gpflowkernel,likelihoodstd=1.0,jitter=1e-4):
+    def __init__(self,X,Y,Z,refsensor,C,transform_fn,gpflowkernel,likemodel='fixed',gpflowkernellike=None,likelihoodstd=1.0,jitter=1e-4,lr=0.02,likelr=None):
         """
         A tool for running the calibration algorithm on a dataset, produces
         estimates of the calibration parameters over time for each sensor.
@@ -173,23 +200,25 @@ class CalibrationSystem():
           TODO: We should allow different kernels for different components.
                 If one wishes to now, then after calling the constructor,
                 set self.k with an alternative kernel object.
+                
+        likemodel : specifies how the likelihood is modelled.
+        It can be one of four values:
+          - fixed [default, uses the value in likelihoodstd]
+          - [not yet] single [optimise a single value [TODO Not Implemented]]!!
+          - distribution [uses gpflowkernellike]
+          - process [uses gpflowkernellike]                
         likelihoodstd : The standard deviation of the likelihood function,
                 which by default computes the difference between observation
                 pairs (default=1.0). The self.likelihoodfn could be set to
                 a different likelihood.
         jitter : Jitter added to ensure stability (default=1e-4).
+        lr, likelr : learning rates.
                              
         TODO what happens if refsensor is integer?
                           if float64 used for others..
         
         """
-        S = len(refsensor)
-        self.C = C
-        self.Y = Y        
-        self.k = Kernel(gpflowkernel)
-        self.likelihoodstd = likelihoodstd
-        
-    
+
         #internally we use a different X and Z:
         #we add additional rows to X and Z to account for the components we are
         #modelling. In principle the different components could have different
@@ -206,54 +235,134 @@ class CalibrationSystem():
         #  2    0    1
         #  1    1    1
         #  2    1    1
-        self.X = np.c_[np.tile(np.r_[np.c_[X[:,0],X[:,1]],np.c_[X[:,0],X[:,2]]],[self.C,1]),np.repeat(np.arange(self.C),2*len(X))]
-
         
-        #Construct Z:
-        #self.Z = np.c_[np.tile(np.r_[np.c_[Z[:,0],Z[:,1]],np.c_[Z[:,0],Z[:,2]]],[C,1]),np.repeat(np.arange(C),2*len(Z))]
+        self.likemodel = likemodel
+        S = len(refsensor)
+        self.C = C
+        self.Y = Y        
+        self.k = Kernel(gpflowkernel)
+        
+        self.likelihoodstd = likelihoodstd
+        self.X = np.c_[np.tile(np.r_[np.c_[X[:,0],X[:,1]],np.c_[X[:,0],X[:,2]]],[self.C,1]),np.repeat(np.arange(self.C),2*len(X))]        
+        
         if Z.shape[1]==1:
             Ztemp = np.c_[np.tile(Z,[S,1]),np.repeat(np.arange(S),len(Z))]
         if Z.shape[1]==2:
             Ztemp = Z
         self.Z = np.c_[np.tile(Ztemp,[C,1]),np.repeat(np.arange(self.C),len(Ztemp))]
         
+        if likemodel=='distribution' or likemodel=='process':
+            assert gpflowkernellike is not None, "You need to specify the kernel to use a distribution or process"
+            self.klike = Kernel(gpflowkernellike)
+            self.Xlike = np.c_[np.r_[np.c_[X[:,0],X[:,1]],np.c_[X[:,0],X[:,2]]],np.repeat(0,2*len(X))]
+            self.Zlike = np.c_[Ztemp,np.repeat(0,len(Ztemp))]
+            if likelr is None: likelr = lr * 4 #probably can optimise this a little quicker?
+            self.likeoptimizer = tf.keras.optimizers.Adam(learning_rate=likelr,amsgrad=False)
+            
         self.N = N = len(X)
         self.refsensor = refsensor.astype(np.float32)
         self.jitter = jitter
-        self.transform_fn = transform_fn        
+        self.transform_fn = transform_fn  
+        self.optimizer = tf.keras.optimizers.Adam(learning_rate=lr,amsgrad=False)    
         self.precompute()
         
     def precompute(self):    
         #definition of q(u)
         M = self.Z.shape[0]
-        self.mu = tf.Variable(0.01*tf.random.normal([M,1]))
-        self.scale = tf.Variable(1*np.tril(0.1*np.random.randn(M,M)+np.eye(M)),dtype=tf.float32)
+        self.mu = tf.Variable(0.001*tf.random.normal([M,1]))
+        self.scale = tf.Variable(0.1*np.tril(0.1*np.random.randn(M,M)+0.1*np.eye(M)),dtype=tf.float32)
+        
+        
+        
+        if self.likemodel=='distribution' or self.likemodel=='process':
+            Mlike = self.Zlike.shape[0]
+            self.mulike = tf.Variable(0.0001*tf.random.normal([Mlike,1]))
+            mu_u = tf.Variable(np.full([Mlike],-12),dtype=tf.float32)
+            cov_u = tf.Variable(self.klike.matrix(self.Zlike,self.Zlike),dtype=tf.float32)
+            self.pulike = tfd.MultivariateNormalFullCovariance(mu_u,cov_u+np.eye(cov_u.shape[0])*self.jitter)
+             #0.8
+            self.smlike = SparseModel(self.Xlike,self.Zlike,1,self.k)
+        else:
+            self.mulike = None
+        if self.likemodel=='process':
+            self.scalelike = tf.Variable(1e-10*np.eye(Mlike),dtype=tf.float32)
+        else:
+            self.scalelike = None
         
         #parameters for p(u)
         mu_u = tf.zeros([M],dtype=tf.float32)
         cov_u = tf.Variable(self.k.matrix(self.Z,self.Z),dtype=tf.float32)
         self.pu = tfd.MultivariateNormalFullCovariance(mu_u,cov_u+np.eye(cov_u.shape[0])*self.jitter)
-
         self.ref = tf.gather(self.refsensor,tf.transpose(tf.reshape(self.X[:(2*self.N),1:2].astype(int),[2,self.N])))
-        self.optimizer = tf.keras.optimizers.Adam(learning_rate=0.05,amsgrad=False)
+        
         self.sm = SparseModel(self.X,self.Z,self.C,self.k)
         
+    def likelihoodfn_nonstationary(self,scaledA,scaledB,varparamA,varparamB):
+        return tfd.Normal(0,0.00001+tf.sqrt(tf.exp(varparamA)+tf.exp(varparamB))).log_prob(scaledA-scaledB)    
+    
     def likelihoodfn(self,scaledA,scaledB):
         return tfd.Normal(0,self.likelihoodstd).log_prob(scaledA-scaledB)
 
-    def run(self,its=700,samples=100):
-        for it in range(its):
+    #@tf.function
+    def run(self,its=None,samples=100,threshold=0.001):
+        """ Run the VI optimisation.
+        
+        its: Number of iterations. Set its to None to automatically stop
+        when the ELBO has reduced by less than threshold percent
+        (between rolling averages of the last 50 calculations
+        and the 50 before that).
+        samples: Number of samples for the stochastic sampling of the
+        gradient
+        threshold: if its is None, this is the percentage change between
+        the rolling average, over 50 iterations. Default: 0.001 (0.1%).
+        """
+        elbo_record = []
+        it = 0
+        while (its is None) or (it<its):
+            it+=1
             with tf.GradientTape() as tape:
                 qu = tfd.MultivariateNormalTriL(self.mu[:,0],self.scale)
                 samps = self.sm.get_samples(self.mu,self.scale,samples)
-                #self.samps = samps
-                #break
                 scaled = tf.concat([self.transform_fn(samps[:,:,::2],self.Y[:,0:1]),self.transform_fn(samps[:,:,1::2],self.Y[:,1:2])],2)
-                #print(samps.shape,self.Y.shape,self.ref.shape,self.ref)
                 scaled = (scaled * (1-self.ref)) + (self.Y * self.ref)
-                #scaled = (self.transform_fn(samps,self.Y) * (1-self.ref)) + (self.Y * self.ref)
-                ell = tf.reduce_mean(tf.reduce_sum(self.likelihoodfn(scaled[:,:,0],scaled[:,:,1]),1))
+                
+                if self.mulike is not None: #if we have non-stationary likelihood variance...
+                    qulike = tfd.MultivariateNormalTriL(self.mulike[:,0],self.scalelike)              
+                    like = self.smlike.get_samples(self.mulike,self.scalelike,samples)
+                    ell = tf.reduce_mean(tf.reduce_sum(self.likelihoodfn_nonstationary(scaled[:,:,0],scaled[:,:,1],like[:,:,0]*(1-self.ref[:,0])-1000*self.ref[:,0],like[:,:,1]*(1-self.ref[:,1])-1000*self.ref[:,1]),1))
+                else: #stationary likelihood variance
+                    ell = tf.reduce_mean(tf.reduce_sum(self.likelihoodfn(scaled[:,:,0],scaled[:,:,1]),1))
+                
                 elbo_loss = -ell+tfd.kl_divergence(qu,self.pu)
-                gradients = tape.gradient(elbo_loss, [self.mu,self.scale])
-                self.optimizer.apply_gradients(zip(gradients, [self.mu, self.scale]))  
+                
+                if self.likemodel=='process':
+                    assert self.mulike is not None
+                    assert self.scalelike is not None
+                    elbo_loss += tfd.kl_divergence(qulike,self.pulike)
+                if self.likemodel=='distribution':
+                    assert self.mulike is not None
+                    elbo_loss -= self.pulike.log_prob(self.mulike[:,0])
 
+                if it%100==0: print("%d (ELBO=%0.4f)" % (it, elbo_loss))
+                
+                if (self.mulike is None) or (it%50<25): #optimise latent fns
+                    gradients = tape.gradient(elbo_loss, [self.mu,self.scale])
+                    self.optimizer.apply_gradients(zip(gradients, [self.mu, self.scale]))  
+                else: #this optimises the likelihood...
+                    if self.likemodel=='distribution':
+                        gradients = tape.gradient(elbo_loss, [self.mulike])
+                        self.likeoptimizer.apply_gradients(zip(gradients, [self.mulike]))
+                    if self.likemodel=='process':
+                        gradients = tape.gradient(elbo_loss, [self.mulike,self.scalelike])
+                        self.likeoptimizer.apply_gradients(zip(gradients, [self.mulike,self.scalelike]))
+
+                elbo_record.append(elbo_loss)
+            if its is None:
+                if it>100:
+                    oldm = np.median(elbo_record[-100:-50])
+                    m = np.median(elbo_record[-50:])
+                    if np.abs((oldm-m)/((oldm+m)/2))<threshold:
+                        #check that nothing weird's happened!
+                        if np.std(elbo_record[-50:])<np.std(elbo_record[-100:-50]):
+                            break
+        return np.array(elbo_record)
