@@ -269,8 +269,10 @@ class CalibrationSystem():
     def precompute(self):    
         #definition of q(u)
         M = self.Z.shape[0]
-        self.mu = tf.Variable(0.001*tf.random.normal([M,1]))
-        self.scale = tf.Variable(0.1*np.tril(0.1*np.random.randn(M,M)+0.1*np.eye(M)),dtype=tf.float32)
+        self.mu = tf.Variable(1.0*tf.random.normal([M,1]))
+        self.scale = tf.Variable(0.1*np.tril(1.0*np.random.randn(M,M)+1.0*np.eye(M)),dtype=tf.float32)        
+        #self.mu = tf.Variable(10.0*tf.random.normal([M,1]))
+        #self.scale = tf.Variable(10.0*np.tril(1.0*np.random.randn(M,M)+1.0*np.eye(M)),dtype=tf.float32)
         
         
         
@@ -318,51 +320,55 @@ class CalibrationSystem():
         """
         elbo_record = []
         it = 0
-        while (its is None) or (it<its):
-            it+=1
-            with tf.GradientTape() as tape:
-                qu = tfd.MultivariateNormalTriL(self.mu[:,0],self.scale)
-                samps = self.sm.get_samples(self.mu,self.scale,samples)
-                scaled = tf.concat([self.transform_fn(samps[:,:,::2],self.Y[:,0:1]),self.transform_fn(samps[:,:,1::2],self.Y[:,1:2])],2)
-                scaled = (scaled * (1-self.ref)) + (self.Y * self.ref)
-                
-                if self.mulike is not None: #if we have non-stationary likelihood variance...
-                    qulike = tfd.MultivariateNormalTriL(self.mulike[:,0],self.scalelike)              
-                    like = self.smlike.get_samples(self.mulike,self.scalelike,samples)
-                    ell = tf.reduce_mean(tf.reduce_sum(self.likelihoodfn_nonstationary(scaled[:,:,0],scaled[:,:,1],like[:,:,0]*(1-self.ref[:,0])-1000*self.ref[:,0],like[:,:,1]*(1-self.ref[:,1])-1000*self.ref[:,1]),1))
-                else: #stationary likelihood variance
-                    ell = tf.reduce_mean(tf.reduce_sum(self.likelihoodfn(scaled[:,:,0],scaled[:,:,1]),1))
-                
-                elbo_loss = -ell+tfd.kl_divergence(qu,self.pu)
-                
-                if self.likemodel=='process':
-                    assert self.mulike is not None
-                    assert self.scalelike is not None
-                    elbo_loss += tfd.kl_divergence(qulike,self.pulike)
-                if self.likemodel=='distribution':
-                    assert self.mulike is not None
-                    elbo_loss -= self.pulike.log_prob(self.mulike[:,0])
-
-                if it%100==0: print("%d (ELBO=%0.4f)" % (it, elbo_loss))
-                
-                if (self.mulike is None) or (it%50<25): #optimise latent fns
-                    gradients = tape.gradient(elbo_loss, [self.mu,self.scale])
-                    self.optimizer.apply_gradients(zip(gradients, [self.mu, self.scale]))  
-                else: #this optimises the likelihood...
-                    if self.likemodel=='distribution':
-                        gradients = tape.gradient(elbo_loss, [self.mulike])
-                        self.likeoptimizer.apply_gradients(zip(gradients, [self.mulike]))
+        print("Starting Run")
+        try:
+            while (its is None) or (it<its):
+                it+=1
+                with tf.GradientTape() as tape:
+                    qu = tfd.MultivariateNormalTriL(self.mu[:,0],self.scale)
+                    samps = self.sm.get_samples(self.mu,self.scale,samples)
+                    scaled = tf.concat([self.transform_fn(samps[:,:,::2],self.Y[:,0:1]),self.transform_fn(samps[:,:,1::2],self.Y[:,1:2])],2)
+                    scaled = (scaled * (1-self.ref)) + (self.Y * self.ref)
+                    
+                    if self.mulike is not None: #if we have non-stationary likelihood variance...
+                        qulike = tfd.MultivariateNormalTriL(self.mulike[:,0],self.scalelike)              
+                        like = self.smlike.get_samples(self.mulike,self.scalelike,samples)
+                        ell = tf.reduce_mean(tf.reduce_sum(self.likelihoodfn_nonstationary(scaled[:,:,0],scaled[:,:,1],like[:,:,0]*(1-self.ref[:,0])-1000*self.ref[:,0],like[:,:,1]*(1-self.ref[:,1])-1000*self.ref[:,1]),1))
+                    else: #stationary likelihood variance
+                        ell = tf.reduce_mean(tf.reduce_sum(self.likelihoodfn(scaled[:,:,0],scaled[:,:,1]),1))
+                    
+                    elbo_loss = -ell+tfd.kl_divergence(qu,self.pu)
+                    
                     if self.likemodel=='process':
-                        gradients = tape.gradient(elbo_loss, [self.mulike,self.scalelike])
-                        self.likeoptimizer.apply_gradients(zip(gradients, [self.mulike,self.scalelike]))
+                        assert self.mulike is not None
+                        assert self.scalelike is not None
+                        elbo_loss += tfd.kl_divergence(qulike,self.pulike)
+                    if self.likemodel=='distribution':
+                        assert self.mulike is not None
+                        elbo_loss -= self.pulike.log_prob(self.mulike[:,0])
 
-                elbo_record.append(elbo_loss)
-            if its is None:
-                if it>100:
-                    oldm = np.median(elbo_record[-100:-50])
-                    m = np.median(elbo_record[-50:])
-                    if np.abs((oldm-m)/((oldm+m)/2))<threshold:
-                        #check that nothing weird's happened!
-                        if np.std(elbo_record[-50:])<np.std(elbo_record[-100:-50]):
-                            break
+                    if it%20==0: print("%d (ELBO=%0.4f)" % (it, elbo_loss))
+                    
+                    if (self.mulike is None) or (it%50<25): #optimise latent fns
+                        gradients = tape.gradient(elbo_loss, [self.mu,self.scale])
+                        self.optimizer.apply_gradients(zip(gradients, [self.mu, self.scale]))  
+                    else: #this optimises the likelihood...
+                        if self.likemodel=='distribution':
+                            gradients = tape.gradient(elbo_loss, [self.mulike])
+                            self.likeoptimizer.apply_gradients(zip(gradients, [self.mulike]))
+                        if self.likemodel=='process':
+                            gradients = tape.gradient(elbo_loss, [self.mulike,self.scalelike])
+                            self.likeoptimizer.apply_gradients(zip(gradients, [self.mulike,self.scalelike]))
+
+                    elbo_record.append(elbo_loss)
+                if its is None:
+                    if it>100:
+                        oldm = np.median(elbo_record[-100:-50])
+                        m = np.median(elbo_record[-50:])
+                        if np.abs((oldm-m)/((oldm+m)/2))<threshold:
+                            #check that nothing weird's happened!
+                            if np.std(elbo_record[-50:])<np.std(elbo_record[-100:-50]):
+                                break
+        except KeyboardInterrupt:
+            pass
         return np.array(elbo_record)
