@@ -63,7 +63,7 @@ class EQ(Kernel):
         
         
 class SparseModel():
-    def __init__(self,X,Z,C,k):
+    def __init__(self,X,Z,C,k,jitter=1e-4):
         """
         A Gaussian process Sparse model for performing Variational Inference.
         
@@ -91,7 +91,7 @@ class SparseModel():
         and returns a single 'sample' which is the posterior mean prediction.
         """
         
-        self.jitter = 1e-4
+        self.jitter = jitter
         
         self.k = k
         self.Kzz = k.matrix(Z,Z)+np.eye(Z.shape[0],dtype=np.float32)*self.jitter
