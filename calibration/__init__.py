@@ -172,7 +172,7 @@ def getcov(scale):
     return tf.linalg.band_part(scale, -1, 0) @ tf.transpose(tf.linalg.band_part(scale, -1, 0))
 
 class CalibrationSystem():
-    def __init__(self,X,Y,Z,refsensor,C,transform_fn,gpflowkernel,likemodel='fixed',gpflowkernellike=None,likelihoodstd=1.0,jitter=1e-4,lr=0.02,likelr=None,minibatchsize=100):
+    def __init__(self,X,Y,Z,refsensor,C,transform_fn,gpflowkernel,likemodel='fixed',gpflowkernellike=None,likelihoodstd=1.0,jitter=1e-4,lr=0.02,likelr=None,minibatchsize=100,sideY=None):
         """
         A tool for running the calibration algorithm on a dataset, produces
         estimates of the calibration parameters over time for each sensor.
@@ -215,6 +215,8 @@ class CalibrationSystem():
                 a different likelihood.
         jitter : Jitter added to ensure stability (default=1e-4).
         lr, likelr : learning rates.
+        sideY : side information (humidity, temperature, etc. These are provided
+        to the transform_fn)
                              
         TODO what happens if refsensor is integer?
                           if float64 used for others..
@@ -241,6 +243,7 @@ class CalibrationSystem():
         self.likemodel = likemodel
         S = len(refsensor)
         self.C = C
+        self.fullsideY = sideY
         self.fullY = Y        
         self.k = Kernel(gpflowkernel)
         
@@ -303,6 +306,10 @@ class CalibrationSystem():
         self.Xlike = np.c_[np.r_[np.c_[self.fullX[batch,0],self.fullX[batch,1]],np.c_[self.fullX[batch,0],self.fullX[batch,2]]],np.repeat(0,2*self.minibatchsize)]  
         self.ref = tf.gather(self.refsensor,tf.transpose(tf.reshape(self.X[:(2*self.minibatchsize),1:2].astype(int),[2,self.minibatchsize])))
         self.Y = self.fullY[batch,:]
+        if self.fullsideY is not None:
+            self.sideY = self.fullsideY[batch,:]
+        else:
+            self.sideY = None
         
     def likelihoodfn_nonstationary(self,scaledA,scaledB,varparamA,varparamB):
         return tfd.Normal(0,0.00001+tf.sqrt(tf.exp(varparamA)+tf.exp(varparamB))).log_prob(scaledA-scaledB)    
@@ -337,7 +344,7 @@ class CalibrationSystem():
                     self.sm = SparseModel(self.X,self.Z,self.C,self.k)
                     
                     samps = self.sm.get_samples(self.mu,self.scale,samples)
-                    scaled = tf.concat([self.transform_fn(samps[:,:,::2],self.Y[:,0:1]),self.transform_fn(samps[:,:,1::2],self.Y[:,1:2])],2)
+                    scaled = tf.concat([self.transform_fn(samps[:,:,::2],self.Y[:,0:1],self.sideY),self.transform_fn(samps[:,:,1::2],self.Y[:,1:2],self.sideY)],2)
                     scaled = (scaled * (1-self.ref)) + (self.Y * self.ref)
                     
                     if self.mulike is not None: #if we have non-stationary likelihood variance...
@@ -489,7 +496,7 @@ class SparseModelNoMiniBatch():
         return samps
 
 class CalibrationSystemNoMiniBatch():
-    def __init__(self,X,Y,Z,refsensor,C,transform_fn,gpflowkernel,likemodel='fixed',gpflowkernellike=None,likelihoodstd=1.0,jitter=1e-4,lr=0.02,likelr=None):
+    def __init__(self,X,Y,Z,refsensor,C,transform_fn,gpflowkernel,likemodel='fixed',gpflowkernellike=None,likelihoodstd=1.0,jitter=1e-4,lr=0.02,likelr=None, sideY=None):
         """
         A tool for running the calibration algorithm on a dataset, produces
         estimates of the calibration parameters over time for each sensor.
@@ -532,6 +539,9 @@ class CalibrationSystemNoMiniBatch():
                 a different likelihood.
         jitter : Jitter added to ensure stability (default=1e-4).
         lr, likelr : learning rates.
+        sideY : side information (humidity, temperature, etc. These are provided
+        to the transform_fn)
+        
                              
         TODO what happens if refsensor is integer?
                           if float64 used for others..
@@ -558,7 +568,8 @@ class CalibrationSystemNoMiniBatch():
         self.likemodel = likemodel
         S = len(refsensor)
         self.C = C
-        self.Y = Y        
+        self.Y = Y    
+        self.sideY = sideY    
         self.k = Kernel(gpflowkernel)
         
         self.likelihoodstd = likelihoodstd
@@ -643,7 +654,7 @@ class CalibrationSystemNoMiniBatch():
                 with tf.GradientTape() as tape:
                     qu = tfd.MultivariateNormalTriL(self.mu[:,0],self.scale)
                     samps = self.sm.get_samples(self.mu,self.scale,samples)
-                    scaled = tf.concat([self.transform_fn(samps[:,:,::2],self.Y[:,0:1]),self.transform_fn(samps[:,:,1::2],self.Y[:,1:2])],2)
+                    scaled = tf.concat([self.transform_fn(samps[:,:,::2],self.Y[:,0:1],self.sideY),self.transform_fn(samps[:,:,1::2],self.Y[:,1:2],self.sideY)],2)
                     scaled = (scaled * (1-self.ref)) + (self.Y * self.ref)
                     
                     if self.mulike is not None: #if we have non-stationary likelihood variance...
