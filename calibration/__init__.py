@@ -237,7 +237,11 @@ def getcov(scale):
     return tf.linalg.band_part(scale, -1, 0) @ tf.transpose(tf.linalg.band_part(scale, -1, 0))
 
 class CalibrationSystem():
+#<<<<<<< HEAD
     def __init__(self,X,Y,Z,refsensor,C,transform_fn,gpflowkernels,kernelindices,likemodel='fixed',gpflowkernellike=None,likelihoodstd=1.0,jitter=1e-4,lr=0.02,likelr=None,minibatchsize=100,sideY=None):
+#=======
+#    def __init__(self,X,Y,Z,refsensor,C,transform_fn,gpflowkernel,likemodel='fixed',gpflowkernellike=None,likelihoodstd=1.0,jitter=1e-4,lr=0.02,likelr=None,minibatchsize=100,sideY=None):
+#>>>>>>> 6d36bfb75f81650ea51ec439eaa9b869b676acff
         """
         A tool for running the calibration algorithm on a dataset, produces
         estimates of the calibration parameters over time for each sensor.
@@ -311,8 +315,13 @@ class CalibrationSystem():
         S = len(refsensor)
         self.C = C
         self.fullsideY = sideY
+#<<<<<<< HEAD
         self.fullY = Y
         self.k = MultiKernel(gpflowkernels,kernelindices)
+#=======
+#        self.fullY = Y        
+#        self.k = Kernel(gpflowkernel)
+#>>>>>>> 6d36bfb75f81650ea51ec439eaa9b869b676acff
         
         self.likelihoodstd = likelihoodstd
         self.minibatchsize = minibatchsize
