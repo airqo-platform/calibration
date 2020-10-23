@@ -14,7 +14,7 @@ Create environment:
 ```
 conda create --name calibration python=3.7
 conda activate calibration
-python setup.py develop
+pip install -e .
 ```
 
 To use Jupyter notebooks:

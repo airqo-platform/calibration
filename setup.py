@@ -10,5 +10,5 @@ setup(
   download_url = 'https://github.com/lionfish0/calibration.git',
   keywords = ['calibration','sensors','internet of things','iot','network','pollution','gaussian process','variational inference','tensorflow'],
   classifiers = [],
-  install_requires=['numpy==1.18.0','tensorflow','absl-py','tensorflow-probability','pandas','scipy','gpflow'],
+  install_requires=['numpy<1.19.0,>=1.16.0','gast==0.3.3','absl-py','tensorflow-probability','pandas','scipy','gpflow'],
 )
