@@ -4,9 +4,32 @@ import matplotlib.pyplot as plt
 from scipy.optimize import curve_fit
 
 def f(x,a,b):
+    """
+    Experimental - calibration function [not used in main code yet]
+    """
     return x*a+b
     
-def compute_simple_calibration(X,Y,delta,refsensor):
+def compute_simple_calibration(X,Y,delta,refsensor,mincolocationsinperiod=3):
+    """
+    Computes scalings of each sensor using the network of colocated observations
+    to connect reference sensors to other sensors by following a shortest path
+    through the network (over time and connections).
+    
+    X = An Nx3 matrix of [time, sensoridA, sensoridB]
+    Y = An Nx2 matrix of measured values at sensorA and sensorB.
+    delta = how long (in the same units of time as in X[:,0]) are the 'chunks'?
+    refsensor = a binary vector of whether a sensor is a reference sensor or not.
+    
+    Returns a lot of debug content at the moment:
+    G - the graph of the 'connections' between sensors [debug]
+    allsp - shortest paths [debug]
+    allcals - [useful!] A dictionary of calibrations. Each item in the dictionary
+       is indexed by a tuple of (sensorid, timechunk) pairs. Each dictionary entry
+       is the log scaling that needs to be applied to get the predicted true value.
+       For example if the value is -0.5, then exp(-0.5)*measured_value would be
+       predicted.
+    allcallists,allpopts,allpcovs,allpoptslists - more debug. Ignore.
+    """
     G = nx.DiGraph()
     maxnum = int(np.max(X[:,1:]))
     #data = np.full([maxnum+1,maxnum+1],np.NaN)
@@ -17,14 +40,14 @@ def compute_simple_calibration(X,Y,delta,refsensor):
         for i in range(maxnum+1):
             for j in range(maxnum+1):
                 keep = (Xkeep[:,1]==i) & (Xkeep[:,2]==j)
-                if len(Ykeep[keep,0])>3: #need a few data points for confidence?
+                if len(Ykeep[keep,0])>mincolocationsinperiod: #need a few data points for confidence?
                     logratio=np.nanmean(np.log(Ykeep[keep,0]/Ykeep[keep,1]))
                     popt, pcov = curve_fit(f,Ykeep[keep,1],Ykeep[keep,0])
                     G.add_edge((i,it),(j,it),val=logratio,popt=popt,pcov=pcov,weight=2)
                     popt, pcov = curve_fit(f,Ykeep[keep,0],Ykeep[keep,1])
                     G.add_edge((j,it),(i,it),val=-logratio,popt=popt,pcov=pcov,weight=2)
     maxit = it
-    for it,starttime in enumerate(np.arange(0,np.max(X[:,0]),delta)):
+    for it,starttime in enumerate(np.arange(0,np.max(X[:,0])+delta,delta)):
         if it>0:
             for i in range(maxnum+1):
                 #if np.all(np.isnan(data[i,:])): continue
@@ -62,13 +85,28 @@ def compute_simple_calibration(X,Y,delta,refsensor):
     return G,allsp,allcals,allcallists,allpopts,allpcovs,allpoptslists
 
 def plot_simple_calibration_graph(G):
+    """
+    Plot the graph.
+    """
     plt.figure(figsize=[15,15])
     #cols = np.array([1 if (n[0]==maxnum) else 0.5 for n in G.nodes])
     #cols += 0.3*np.array([1 if (n[0]==maxnum-1) else 0 for n in G.nodes])
     nx.draw_networkx(G,pos=nx.spring_layout(G))#,node_color=cols)#draw_networkx_edge_labels(G,pos=nx.spring_layout(G))
 
 def compute_simple_predictions(testX,testY,testtrueY,allcals,delta):
-    #for it,starttime in enumerate(np.arange(0,np.max(X[:,0]),delta)):
+    """
+    testX: An Nx2 or Nx3 matrix.
+            First column is time (e.g. seconds or hours since epoch)
+            Second column is the id of the sensor.
+                It might be a 3 column matrix, we just use the first two: datetime and sensor id.
+    testY: The measured values of that sensor.
+    truetestY: The true values of pollution there.
+    allcals: A dictionary of calibrations. Each item in the dictionary is indexed by a tuple of (sensorid, timechunk) pairs.
+       Each dictionary entry is the log scaling that needs to be applied to get the predicted true value.
+       For example if the value is -0.5, then exp(-0.5)*measured_value would be predicted.
+       
+    Returns preds: a vector of predictions for all the tests.
+    Returns res2 and res: temporary returned values for debugging."""
     idx = (testX[:,0]/delta).astype(int)
     preds = np.full_like(testtrueY,np.NaN)
     res = []

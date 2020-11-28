@@ -40,9 +40,32 @@ def NLPD(x,y,ystd):
     
 def compute_test_data(X,Y,trueY,refsensor):
     """
-    This method provides three matrices,
-         testX, testY, testtrueY
-    these are associated with all observations that aren't reference sensors
+    This method produces test data for evaluating models.
+    It returns three matrices,
+         testX, testY, testtrueY.
+    
+    The trueY parameter contains a list of known measurements, with 'nan's for all the other observations.
+    For example, for the Kampala data I've picked out all the data which was observed by a low cost sensor
+    next to sensor #47:
+        from calibration.errormetrics import compute_test_data
+        trueY = np.full_like(Y[:,0],np.NaN)
+        refkeeps = np.isin(X[:,2],[47])
+        trueY[refkeeps] = Y[refkeeps,1]
+        refkeeps = np.isin(X[:,1],[47])
+        trueY[refkeeps] = Y[refkeeps,0]
+        testX, testY, testtrueY = compute_test_data(X,Y,trueY,refsensor)
+    
+    It constructs the output by considering all the colocations with reference instruments and then
+    uess the non-reference instrument as the testY data, and the reference measured values as the trueY values.
+    Parameters:
+         X = An Nx3 matrix of [time, sensoridA, sensoridB]
+         Y = An Nx2 matrix of measured values at sensorA and sensorB.
+         trueY = the true pollution at these measurements - if known - otherwise nan.
+         refsensor = a binary vector of whether a sensor is a reference sensor or not.
+    Returns:
+         testX = an Mx3 matrix of [times, sensorid, 0] <-the last column is left in but unused.
+         testY = the measured value at the colocated low cost sensor
+         testtrueY = the true value of the colocation.
     """
     testX = np.zeros([0,3])
     testY = np.zeros([0,2])
