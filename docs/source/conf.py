@@ -16,6 +16,17 @@ sys.path.insert(0, os.path.abspath('../../'))
 sys.path.insert(0, os.path.abspath('../../calibration/'))
 
 
+# Mock out modules that can't be installed
+
+from unittest.mock import MagicMock
+
+class Mock(MagicMock):
+    @classmethod
+    def __getattr__(cls, name):
+        return MagicMock()
+
+MOCK_MODULES = ['tensorflow']
+
 # -- Project information -----------------------------------------------------
 
 project = 'Calibration'
